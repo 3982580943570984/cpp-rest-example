@@ -10,7 +10,7 @@ auto handle_calculation(const std::map<std::wstring, std::wstring> &params, cons
         json::value answer;
         answer[U("error")] = json::value::string(message);
         request.reply(http::status_codes::BadRequest, answer);
-    };
+    }; 
 
     const auto num1 = std::stod(params.at(U("num1")));
     const auto num2 = std::stod(params.at(U("num2")));
