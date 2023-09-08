@@ -1,20 +1,18 @@
+#include <cmath>
 #include <cpprest/http_listener.h>
 #include <cpprest/json.h>
+#include <set>
 
 namespace json = web::json;
 namespace http = web::http;
 namespace listener = web::http::experimental::listener;
 
-auto handle_calculation(const std::map<std::wstring, std::wstring> &params, const http::http_request &request) {
+auto handle_calculation(const http::http_request &request, const std::map<std::wstring, std::wstring> &query_split) {
     const auto &handle_error = [&](const std::wstring &message) {
         json::value answer;
         answer[U("error")] = json::value::string(message);
         request.reply(http::status_codes::BadRequest, answer);
     };
-
-    const auto num1 = std::stod(params.at(U("num1")));
-    const auto num2 = std::stod(params.at(U("num2")));
-    const auto &operation = params.at(U("operation"));
 
     const auto &handle_success = [&](const double &result) {
         json::value answer;
@@ -22,37 +20,83 @@ auto handle_calculation(const std::map<std::wstring, std::wstring> &params, cons
         request.reply(http::status_codes::OK, answer);
     };
 
-    if (operation == U("add")) {
-        handle_success(num1 + num2);
+    double num1 = NAN, num2 = NAN;
+    try {
+        num1 = std::stod(query_split.at(U("num1")));
+        num2 = std::stod(query_split.at(U("num2")));
+    } catch (const std::exception &) {
+        handle_error(U("Invalid input values."));
         return;
     }
 
-    if (operation == U("subtract")) {
-        handle_success(num1 - num2);
+    const auto operation = web::uri::split_path(request.request_uri().path()).back();
+
+    const std::unordered_map<std::wstring, std::function<void()>> operations = {
+            {U("add"), [&] { handle_success(num1 + num2); }},
+            {U("subtract"), [&] { handle_success(num1 - num2); }},
+            {U("multiply"), [&] { handle_success(num1 * num2); }},
+            {U("divide"), [&] { num2 != 0 ? handle_success(num1 / num2)
+                                          : handle_error(U("Cannot divide by zero")); }},
+    };
+
+    operations.contains(operation)
+            ? std::invoke(operations.at(operation))
+            : handle_error(U("Invalid operation"));
+}
+
+auto handle_trigonometry(const http::http_request &request, const std::map<std::wstring, std::wstring> &query_split) {
+    const auto &handle_error = [&](const std::wstring &message) {
+        json::value answer;
+        answer[U("error")] = json::value::string(message);
+        request.reply(http::status_codes::BadRequest, answer);
+    };
+
+    const auto &handle_success = [&](const double &result) {
+        json::value answer;
+        answer[U("result")] = json::value::number(result);
+        request.reply(http::status_codes::OK, answer);
+    };
+
+    double num1 = NAN, num2 = NAN;
+    try {
+        num1 = std::stod(query_split.at(U("num1")));
+        num2 = std::stod(query_split.at(U("num2")));
+    } catch (const std::exception &) {
+        handle_error(U("Invalid input values."));
         return;
     }
 
-    if (operation == U("multiply")) {
-        handle_success(num1 * num2);
+    const auto operation = web::uri::split_path(request.request_uri().path()).back();
+
+    if (num2 == 0) {
+        handle_error(U("Cannot divide by zero"));
         return;
     }
 
-    if (operation == U("divide")) {
-        if (num2 == 0) {
-            handle_error(U("Cannot divide by zero"));
-            return;
-        }
+    const std::unordered_map<std::wstring, std::function<void()>> operations = {
+            {U("sin"), [&] { handle_success(std::sin(num1 / num2)); }},
+            {U("cos"), [&] { handle_success(std::cos(num1 / num2)); }},
+            {U("tan"), [&] { handle_success(std::tan(num1 / num2)); }},
+            {U("ctg"), [&] { handle_success(1 / std::tan(num1 / num2)); }},
+    };
 
-        handle_success(num1 / num2);
-        return;
-    }
+    operations.contains(operation)
+            ? std::invoke(operations.at(operation))
+            : handle_error(U("Invalid operation"));
+}
 
-    handle_error(U("Invalid operation"));
+auto handle_appropriate_path(const http::http_request &request, const std::map<std::wstring, std::wstring> &http_vars) {
+    const auto path_split{web::uri::split_path(request.request_uri().path())};
+    const std::set<std::wstring> path_vars{path_split.cbegin(), path_split.cend()};
+
+    path_vars.contains(U("calculation"))
+            ? handle_calculation(request, http_vars)
+            : handle_trigonometry(request, http_vars);
 }
 
 auto handle_get(const http::http_request &request) {
-    const auto &http_get_vars = web::uri::split_query(request.request_uri().query());
-    handle_calculation(http_get_vars, request);
+    const auto &query_split{web::uri::split_query(request.request_uri().query())};
+    handle_appropriate_path(request, query_split);
 }
 
 auto handle_post(http::http_request request) {
@@ -72,27 +116,39 @@ auto handle_post(http::http_request request) {
         }
     }
 
-    handle_calculation(http_post_vars, request);
+    handle_appropriate_path(request, http_post_vars);
 }
 
 auto main() -> int {
-    listener::http_listener listener(U("http://localhost:8080/calculator"));
+    std::vector uris{
+            U("http://localhost:8080/calculation/add"),
+            U("http://localhost:8080/calculation/subtract"),
+            U("http://localhost:8080/calculation/multiply"),
+            U("http://localhost:8080/calculation/divide"),
 
-    listener.support(http::methods::GET, handle_get);
-    listener.support(http::methods::POST, handle_post);
+            U("http://localhost:8080/trigonometry/sin"),
+            U("http://localhost:8080/trigonometry/cos"),
+            U("http://localhost:8080/trigonometry/tan"),
+            U("http://localhost:8080/trigonometry/ctg"),
+    };
 
-    try {
+    std::vector<listener::http_listener> listeners;
+    for (const auto &uri: uris) {
+        listeners.emplace_back(uri);
+        auto &listener = listeners.back();
+
+        listener.support(http::methods::GET, handle_get);
+        listener.support(http::methods::POST, handle_post);
+
         listener
                 .open()
-                .then([]() { ucout << U("Starting to listen\n"); })
+                .then([&]() { std::wcout << U("Starting to listen on ") << uri << U("\n"); })
                 .wait();
-
-        std::cout << "Press Enter to exit." << std::endl;
-        std::string line;
-        std::getline(std::cin, line);
-    } catch (std::exception const &e) {
-        std::cout << e.what() << std::endl;
     }
+
+    std::cout << "Press Enter to exit." << std::endl;
+    std::string line;
+    std::getline(std::cin, line);
 
     return 0;
 }
